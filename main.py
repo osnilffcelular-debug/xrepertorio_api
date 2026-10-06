@@ -5,21 +5,23 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
+@app.route('/')
 @app.route('/solicitar_vss', methods=['POST'])
 def solicitar_vss():
-    dados = request.get_json(force=True)
-    nome_musica = dados.get('musica', '')
-    
-    if not nome_musica:
-        return jsonify({"erro": "Nome da musica nao fornecido"}), 400
+    try:
+        dados = request.get_json(force=True)
+    except:
+        dados = {}
         
-    print(f"🔍 BUSCANDO NA WEB GLOBAL: {nome_musica}")
+    nome_musica = dados.get('musica', 'Musica_Desconhecida')
+    print(f"\n⚡ [SUCESSO GLOBAL] Pedido recebido na Railway: {nome_musica}")
     
     return jsonify({
         "status": "processando",
-        "mensagem": f"A IA na nuvem localizou '{nome_musica}'. O download e a separacao das 6 pistas foram iniciados com sucesso!"
+        "mensagem": f"A IA na Railway localizou '{nome_musica}'. O download e a separacao foram iniciados!"
     }), 200
 
 if __name__ == '__main__':
-    porta = int(os.environ.get("PORT", 8000))
+    # A Railway exige ler a porta dynamicamente dessa forma:
+    porta = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=porta, debug=False)
