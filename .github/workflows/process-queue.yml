@@ -1,0 +1,107 @@
+name: Processar Fila Sob Demanda
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_items:
+        description: 'Máximo de músicas para processar'
+        required: false
+        default: '1'
+      priority:
+        description: 'Prioridade mínima (1=usuário, 0=todas)'
+        required: false
+        default: '0'
+      id:
+        description: 'ID específico da música (opcional)'
+        required: false
+        default: ''
+
+env:
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  B2_ENDPOINT_URL: ${{ secrets.B2_ENDPOINT_URL }}
+  B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+  B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+  DEMUCS_MODELO: 'htdemucs'
+  MAX_WORKERS: '2'
+  SKIP_BASIC_PITCH: '1'
+  SINTETIZAR_INSTRUMENTOS: '0'
+  # Para webhook
+  SUPABASE_PROJECT_REF: 'fmigftnzxujwobmukzfn'
+  WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+
+jobs:
+  process-queue:
+    # Dynamic job name includes musica_id for webhook identification
+    name: "process-queue-${{ github.event.inputs.id != '' && github.event.inputs.id || 'batch' }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Cache Demucs models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/torch/hub/checkpoints/
+          key: demucs-models-${{ runner.os }}-${{ hashFiles('worker/motor_completo_acervo.py') }}
+          restore-keys: |
+            demucs-models-${{ runner.os }}-
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependências do sistema
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fluidsynth fluid-soundfont-gm ffmpeg
+
+      - name: Instalar dependências Python
+        run: |
+          pip install -q -U pip
+          pip install -q supabase demucs sphn basic-pitch pretty-midi requests boto3 yt-dlp yt-dlp-ejs
+
+      - name: Processar música específica (on-demand)
+        if: github.event.inputs.id != ''
+        id: process_single
+        run: |
+          python -m worker.motor_completo_acervo --id "${{ github.event.inputs.id }}" --priority 1
+
+      - name: Processar fila por prioridade
+        if: github.event.inputs.id == ''
+        id: process_batch
+        run: |
+          python -m worker.motor_completo_acervo --limit ${{ github.event.inputs.max_items }} --priority ${{ github.event.inputs.priority }}
+
+      - name: Notificar webhook Supabase (completed/failed)
+        if: always()
+        env:
+          MUSICA_ID: ${{ github.event.inputs.id }}
+          JOB_STATUS: ${{ job.status }}
+          SUPABASE_URL: https://fmigftnzxujwobmukzfn.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          if [ -z "$MUSICA_ID" ] || [ "$MUSICA_ID" = "" ]; then
+            echo "Nenhum ID específico para notificar (batch mode)"
+            exit 0
+          fi
+          STATUS="$JOB_STATUS"
+          if [ "$STATUS" = "success" ]; then
+            STATUS="completed"
+          elif [ "$STATUS" = "failure" ] || [ "$STATUS" = "cancelled" ]; then
+            STATUS="failed"
+          fi
+          PAYLOAD=$(jq -n --arg id "$MUSICA_ID" --arg status "$STATUS" '{musica_id: $id, status: $status}')
+          SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | sed 's/^.* //')
+          curl -X POST "$SUPABASE_URL/functions/v1/github-webhook" \
+            -H "Authorization: Bearer $SUPABASE_SERVICE_ROLE_KEY" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Signature-256: sha256=$SIGNATURE" \
+            -d "$PAYLOAD" \
+            --max-time 10 \
+            --fail-with-body || echo "Webhook falhou (não bloqueia o job)"

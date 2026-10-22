@@ -1,0 +1,100 @@
+name: Trends Diário (Paralelo)
+
+on:
+  schedule:
+    # Roda a cada 3 horas (8x/dia) - madrugada BRT para não competir com usuários
+    - cron: '0 3,6,9,12,15,18,21,0 * * *'  # 00h, 03h, 06h, 09h, 12h, 15h, 18h, 21h UTC = 21h, 00h, 03h, 06h, 09h, 12h, 15h, 18h BRT
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: 'Músicas por chunk (padrão 10)'
+        required: false
+        default: '10'
+      chunks:
+        description: 'Número de chunks paralelos (padrão 5 = 50 músicas)'
+        required: false
+        default: '5'
+
+env:
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+  B2_ENDPOINT_URL: ${{ secrets.B2_ENDPOINT_URL }}
+  B2_KEY_ID: ${{ secrets.B2_KEY_ID }}
+  B2_APPLICATION_KEY: ${{ secrets.B2_APPLICATION_KEY }}
+  B2_BUCKET_NAME: ${{ secrets.B2_BUCKET_NAME }}
+  TENDENCIAS_LIMITE_FILA: ${{ github.event.inputs.limit || '10' }}
+  TENDENCIAS_INTERVALO_HORAS: '3'
+  TENDENCIAS_PROPORCAO_NACIONAL: '3'
+  DEMUCS_MODELO: 'htdemucs'
+  MAX_WORKERS: '2'
+  SKIP_BASIC_PITCH: '1'
+  SINTETIZAR_INSTRUMENTOS: '0'
+  # Para webhook (batch mode - usa polling/Realtime em vez de webhook direto)
+  SUPABASE_PROJECT_REF: 'fmigftnzxujwobmukzfn'
+  WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+
+jobs:
+  trends:
+    name: Trends Chunk ${{ matrix.chunk }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        chunk: [0, 1, 2, 3, 4]  # 5 jobs paralelos = 50 músicas total (10 cada)
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Cache Demucs models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/torch/hub/checkpoints/
+          key: demucs-models-${{ runner.os }}-${{ hashFiles('worker/motor_completo_acervo.py') }}
+          restore-keys: |
+            demucs-models-${{ runner.os }}-
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Instalar dependências do sistema
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fluidsynth fluid-soundfont-gm ffmpeg
+
+      - name: Instalar dependências Python
+        run: |
+          pip install -q -U pip
+          pip install -q supabase demucs sphn basic-pitch pretty-midi requests boto3 yt-dlp yt-dlp-ejs
+
+      - name: Executar Agente de Tendências (chunk ${{ matrix.chunk }})
+        run: |
+          python -m worker.agente_tendencias --chunk ${{ matrix.chunk }} --chunks 5
+        env:
+          # Cada chunk processa 1/5 do limite total
+          CHUNK_INDEX: ${{ matrix.chunk }}
+          TOTAL_CHUNKS: 5
+
+      - name: Processar fila (chunk ${{ matrix.chunk }})
+        run: |
+          python -m worker.motor_completo_acervo --limit 10 --offset ${{ matrix.chunk * 10 }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+
+      - name: Notificar webhook Supabase (batch summary)
+        if: always()
+        env:
+          JOB_STATUS: ${{ job.status }}
+          CHUNK_INDEX: ${{ matrix.chunk }}
+          SUPABASE_URL: https://fmigftnzxujwobmukzfn.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+        run: |
+          # Em modo batch, não temos IDs específicos aqui.
+          # O webhook serve como heartbeat/status do chunk.
+          # O app Flutter usa Realtime para detectar mudanças no status.
+          echo "Chunk ${{ matrix.chunk }} finalizado com status: $JOB_STATUS"
+          # Opcional: poderia consultar o DB por músicas updated_at recente e notificar individualmente
