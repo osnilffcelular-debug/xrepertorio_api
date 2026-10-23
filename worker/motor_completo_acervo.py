@@ -516,15 +516,35 @@ def marcar_falha(musica_id, erro):
 
 
 def processar_com_status(musica):
+    import signal
+    
+    class TimeoutError(Exception):
+        pass
+    
+    def timeout_handler(signum, frame):
+        raise TimeoutError(f"Timeout processando música {musica.get('nome_musica')} (ID: {musica['id']}) após 300s")
+    
+    # Timeout de 5 minutos por música (só funciona no Linux/Unix)
+    old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+    signal.alarm(300)  # 5 minutos
+    
     try:
-        processar(musica)
-        return "completed"
-    except Exception as erro:
-        traceback.print_exc()
-        marcar_falha(musica["id"], erro)
-        return "failed"
+        try:
+            processar(musica)
+            return "completed"
+        except Exception as erro:
+            traceback.print_exc()
+            marcar_falha(musica["id"], erro)
+            return "failed"
+        finally:
+            liberar_gpu()
+    except TimeoutError as e:
+        print(f"[TIMEOUT] {e}")
+        marcar_falha(musica["id"], e)
+        return "timeout"
     finally:
-        liberar_gpu()
+        signal.alarm(0)  # Cancela alarme
+        signal.signal(signal.SIGALRM, old_handler)
 
 
 def heartbeat():
