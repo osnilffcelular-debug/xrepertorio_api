@@ -79,10 +79,11 @@ jobs:
           TOTAL_CHUNKS: 5
 
       - name: Processar fila (chunk ${{ matrix.chunk }})
-        run: |
-          python -m worker.motor_completo_acervo --limit 10 --offset ${{ matrix.chunk * 10 }}
         env:
           PYTHONPATH: ${{ github.workspace }}
+          CHUNK_OFFSET: ${{ matrix.chunk * 10 }}
+        run: |
+          python -m worker.motor_completo_acervo --limit 10 --offset $CHUNK_OFFSET
 
       - name: Notificar webhook Supabase (batch summary)
         if: always()
