@@ -78,10 +78,14 @@ jobs:
           CHUNK_INDEX: ${{ matrix.chunk }}
           TOTAL_CHUNKS: 5
 
+      - name: Calcular offset
+        id: calc_offset
+        run: echo "offset=$(( ${{ matrix.chunk }} * 10 ))" >> $GITHUB_OUTPUT
+
       - name: Processar fila (chunk ${{ matrix.chunk }})
         env:
           PYTHONPATH: ${{ github.workspace }}
-          CHUNK_OFFSET: ${{ matrix.chunk * 10 }}
+          CHUNK_OFFSET: ${{ steps.calc_offset.outputs.offset }}
         run: |
           python -m worker.motor_completo_acervo --limit 10 --offset $CHUNK_OFFSET
 
