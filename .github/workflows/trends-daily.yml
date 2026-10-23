@@ -75,6 +75,7 @@ jobs:
           python -m worker.agente_tendencias --chunk ${{ matrix.chunk }} --chunks 5
         env:
           # Cada chunk processa 1/5 do limite total
+          PYTHONPATH: ${{ github.workspace }}
           CHUNK_INDEX: ${{ matrix.chunk }}
           TOTAL_CHUNKS: 5
 
