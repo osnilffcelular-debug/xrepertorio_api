@@ -518,8 +518,12 @@ def marcar_falha(musica_id, erro):
 def processar_com_status(musica):
     import multiprocessing
     import queue
+    import os
+    import signal
     
     def worker_process(q, musica_data):
+        # Cria novo process group para poder matar toda a árvore
+        os.setsid()
         try:
             processar(musica_data)
             q.put(("completed", None))
@@ -538,12 +542,18 @@ def processar_com_status(musica):
     p.join(timeout=300)
     
     if p.is_alive():
-        # Timeout - mata o processo e filhos
-        print(f"[TIMEOUT] Música {musica.get('nome_musica')} (ID: {musica['id']}) excedeu 300s - matando processo")
-        p.terminate()
+        # Timeout - mata o process group inteiro (inclui filhos do Demucs)
+        print(f"[TIMEOUT] Música {musica.get('nome_musica')} (ID: {musica['id']}) excedeu 300s - matando process group")
+        try:
+            os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
         p.join(timeout=5)
         if p.is_alive():
-            p.kill()
+            try:
+                os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
             p.join()
         marcar_falha(musica["id"], "Timeout: processamento excedeu 5 minutos")
         return "timeout"
