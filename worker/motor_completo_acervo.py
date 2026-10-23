@@ -516,35 +516,49 @@ def marcar_falha(musica_id, erro):
 
 
 def processar_com_status(musica):
-    import signal
+    import multiprocessing
+    import queue
     
-    class TimeoutError(Exception):
-        pass
-    
-    def timeout_handler(signum, frame):
-        raise TimeoutError(f"Timeout processando música {musica.get('nome_musica')} (ID: {musica['id']}) após 300s")
-    
-    # Timeout de 5 minutos por música (só funciona no Linux/Unix)
-    old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(300)  # 5 minutos
-    
-    try:
+    def worker_process(q, musica_data):
         try:
-            processar(musica)
-            return "completed"
-        except Exception as erro:
+            processar(musica_data)
+            q.put(("completed", None))
+        except Exception as e:
+            import traceback
             traceback.print_exc()
-            marcar_falha(musica["id"], erro)
-            return "failed"
+            q.put(("failed", str(e)[:500]))
         finally:
             liberar_gpu()
-    except TimeoutError as e:
-        print(f"[TIMEOUT] {e}")
-        marcar_falha(musica["id"], e)
+    
+    q = multiprocessing.Queue()
+    p = multiprocessing.Process(target=worker_process, args=(q, musica))
+    p.start()
+    
+    # Timeout de 5 minutos (300 segundos)
+    p.join(timeout=300)
+    
+    if p.is_alive():
+        # Timeout - mata o processo e filhos
+        print(f"[TIMEOUT] Música {musica.get('nome_musica')} (ID: {musica['id']}) excedeu 300s - matando processo")
+        p.terminate()
+        p.join(timeout=5)
+        if p.is_alive():
+            p.kill()
+            p.join()
+        marcar_falha(musica["id"], "Timeout: processamento excedeu 5 minutos")
         return "timeout"
-    finally:
-        signal.alarm(0)  # Cancela alarme
-        signal.signal(signal.SIGALRM, old_handler)
+    
+    # Processo terminou - pega resultado
+    try:
+        status, erro = q.get_nowait()
+        if status == "completed":
+            return "completed"
+        else:
+            marcar_falha(musica["id"], erro)
+            return "failed"
+    except queue.Empty:
+        marcar_falha(musica["id"], "Erro desconhecido: processo terminou sem resultado")
+        return "failed"
 
 
 def heartbeat():
